@@ -28,7 +28,7 @@ jobs:
     name: Kiểm tra cú pháp và cấu hình
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: ShellCheck các script
         run: shellcheck -x scripts/*.sh
@@ -47,7 +47,7 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Tạo .env mẫu
         run: cp .env.example .env
@@ -69,7 +69,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Khởi tạo .env (mật khẩu ngẫu nhiên)
         run: ./scripts/init-env.sh
