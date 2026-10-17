@@ -1,0 +1,86 @@
+# =============================================================================
+#  OVERLAY GIÁM SÁT (nâng cao): cAdvisor -> Prometheus -> Grafana
+#   - cAdvisor   : đo CPU/RAM/mạng/đĩa của TỪNG container
+#   - Prometheus : thu thập (scrape) số liệu mỗi 15s + luật cảnh báo (alerts.yml)
+#   - Grafana    : dashboard dựng sẵn qua provisioning
+#  Bật bằng: thêm docker-compose.monitoring.yml vào COMPOSE_FILE trong .env
+#  Khuyến nghị chạy trên máy Linux/VM. Docker Desktop (Windows/macOS) có thể thiếu một số số liệu.
+# =============================================================================
+services:
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: nc_cadvisor
+    restart: unless-stopped
+    privileged: true                 # cAdvisor cần đọc cgroup/thiết bị của host (các mount bên dưới đều :ro)
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=15s
+    networks:
+      - monitoring
+    mem_limit: 256m
+    logging: &mon-logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: nc_prometheus
+    restart: unless-stopped
+    depends_on:
+      - cadvisor
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "${MON_BIND_IP:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro   # BIND MOUNT
+      - ./monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro           # BIND MOUNT
+      - prometheus_data:/prometheus                                                # NAMED VOLUME
+    networks:
+      - monitoring
+    mem_limit: 512m
+    logging: *mon-logging
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: nc_grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Chưa có .env - hãy chạy ./scripts/init-env.sh}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    ports:
+      - "${MON_BIND_IP:-127.0.0.1}:${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - monitoring
+    mem_limit: 256m
+    logging: *mon-logging
+
+networks:
+  monitoring:
+    name: nc_monitoring
+
+volumes:
+  prometheus_data:
+    name: nc_prometheus_data
+  grafana_data:
+    name: nc_grafana_data

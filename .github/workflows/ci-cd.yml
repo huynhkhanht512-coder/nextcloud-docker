@@ -1,0 +1,162 @@
+# =============================================================================
+#  CI/CD cho stack Nextcloud
+#   validate     : shellcheck + `docker compose config` cho 3 tổ hợp file
+#   scan-images  : quét lỗ hổng toàn bộ image bằng Trivy
+#   smoke-test   : dựng stack thật -> kiểm tra HTTP -> backup -> xóa volume -> restore -> kiểm tra lại
+#   deploy       : (chỉ nhánh main) SSH vào máy chủ, backup, pull image, up -d
+#  Chạy thêm mỗi sáng thứ Hai để phát hiện lỗ hổng mới trong image.
+# =============================================================================
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Kiểm tra cú pháp và cấu hình
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ShellCheck các script
+        run: shellcheck -x scripts/*.sh
+
+      - name: Tạo .env mẫu để compose có đủ biến
+        run: cp .env.example .env
+
+      - name: docker compose config (3 tổ hợp file)
+        run: |
+          docker compose -f docker-compose.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.security.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.security.yml -f docker-compose.monitoring.yml config -q
+
+  scan-images:
+    name: Quét lỗ hổng image (Trivy)
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tạo .env mẫu
+        run: cp .env.example .env
+
+      - name: Quét từng image trong stack
+        run: |
+          images=$(docker compose -f docker-compose.yml -f docker-compose.security.yml -f docker-compose.monitoring.yml config --images | sort -u)
+          for img in $images; do
+            echo "::group::Trivy $img"
+            # Đổi --exit-code 0 thành 1 nếu muốn pipeline THẤT BẠI khi có lỗ hổng CRITICAL đã có bản vá
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest \
+              image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 0 "$img"
+            echo "::endgroup::"
+          done
+
+  smoke-test:
+    name: Dựng stack thật và kiểm thử backup/restore
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Khởi tạo .env (mật khẩu ngẫu nhiên)
+        run: ./scripts/init-env.sh
+
+      - name: Khởi động stack
+        run: docker compose up -d
+
+      - name: Chờ Nextcloud healthy
+        run: |
+          for i in $(seq 1 72); do
+            s=$(docker inspect -f '{{.State.Health.Status}}' nc_app 2>/dev/null || echo none)
+            echo "[$i] nc_app: $s"
+            if [ "$s" = "healthy" ]; then exit 0; fi
+            sleep 5
+          done
+          echo "Hết thời gian chờ"; docker compose logs --tail 100; exit 1
+
+      - name: Kiểm tra HTTP /status.php
+        run: |
+          out=$(curl -fsS http://localhost:8080/status.php)
+          echo "$out"
+          echo "$out" | grep -q '"installed":true'
+
+      - name: Kiểm thử backup -> mất dữ liệu -> restore
+        run: |
+          set -euo pipefail
+          USER_NC=$(grep '^NEXTCLOUD_ADMIN_USER=' .env | cut -d= -f2-)
+          PASS_NC=$(grep '^NEXTCLOUD_ADMIN_PASSWORD=' .env | cut -d= -f2-)
+          URL="http://localhost:8080/remote.php/dav/files/${USER_NC}/ci.txt"
+
+          echo "hello-ci" > ci.txt
+          curl -fsS -u "${USER_NC}:${PASS_NC}" -T ci.txt "$URL"
+
+          ./scripts/backup.sh
+          ls -lh backup
+
+          docker compose down -v          # mô phỏng mất toàn bộ dữ liệu
+          TS=$(ls backup/volumes_*.tar.gz | sed -E 's/.*volumes_(.*)\.tar\.gz/\1/' | sort | tail -1)
+          ./scripts/restore.sh -y "$TS"
+
+          body=$(curl -fsS -u "${USER_NC}:${PASS_NC}" "$URL")
+          echo "Nội dung sau restore: $body"
+          echo "$body" | grep -q 'hello-ci'
+
+      - name: Log khi có lỗi
+        if: failure()
+        run: |
+          docker compose ps -a
+          docker compose logs --tail 200
+
+      - name: Dọn dẹp
+        if: always()
+        run: docker compose down -v
+
+  deploy:
+    name: Triển khai lên máy chủ (SSH)
+    needs: [validate, smoke-test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production      # đặt "Required reviewers" ở Settings > Environments để duyệt tay trước khi deploy
+    steps:
+      - name: Deploy
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          if [ -z "${DEPLOY_HOST:-}" ]; then
+            echo "Chưa cấu hình secrets DEPLOY_* -> bỏ qua bước deploy."
+            exit 0
+          fi
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          if [ -n "${DEPLOY_KNOWN_HOSTS:-}" ]; then
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          else
+            echo "::warning::Chưa có DEPLOY_KNOWN_HOSTS, dùng ssh-keyscan (kém an toàn hơn)"
+            ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+          fi
+          ssh -i ~/.ssh/id_deploy "$DEPLOY_USER@$DEPLOY_HOST" "set -e
+            cd '$DEPLOY_PATH'
+            git pull --ff-only
+            ./scripts/backup.sh || echo 'Bỏ qua backup (stack chưa chạy)'
+            docker compose pull
+            docker compose up -d --remove-orphans
+            docker image prune -f
+            docker compose ps"
