@@ -33,7 +33,7 @@ services:
         max-file: "3"
 
   prometheus:
-    image: prom/prometheus:v2.55.1
+    image: prom/prometheus:v3.15.0
     container_name: nc_prometheus
     restart: unless-stopped
     depends_on:
