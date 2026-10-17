@@ -54,7 +54,7 @@ services:
     logging: *mon-logging
 
   grafana:
-    image: grafana/grafana:11.3.0
+    image: grafana/grafana:13.2.4
     container_name: nc_grafana
     restart: unless-stopped
     depends_on:
