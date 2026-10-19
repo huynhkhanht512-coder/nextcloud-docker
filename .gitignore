@@ -1,0 +1,15 @@
+# Bí mật – KHÔNG commit
+.env
+*.pem
+*.key
+deploy_key*
+caddy-root.crt
+
+# Dữ liệu sinh ra khi chạy / demo
+backup/*
+!backup/.gitkeep
+shared/*
+!shared/.gitkeep
+demo.txt
+big.bin
+ci.txt

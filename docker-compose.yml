@@ -1,0 +1,154 @@
+# =============================================================================
+#  NEXTCLOUD STACK – FILE COMPOSE LÕI
+#  Dịch vụ : nextcloud (app) + cron + mariadb (db) + redis
+#  Chạy    : docker compose up -d
+#  Mở rộng : docker-compose.security.yml  (HTTPS, giới hạn tài nguyên, hardening)
+#            docker-compose.monitoring.yml (cAdvisor + Prometheus + Grafana)
+#  Chọn file bằng biến COMPOSE_FILE trong .env (xem .env.example)
+# =============================================================================
+name: nextcloud-stack
+
+# Cấu hình dùng chung cho mọi service (YAML anchor)
+x-common: &common
+  restart: unless-stopped            # tự khởi động lại khi crash / khi reboot (trừ khi chính bạn `stop`)
+  logging:                           # xoay vòng log, tránh đầy ổ đĩa
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  # ---------------------------------------------------------------- Database
+  db:
+    <<: *common
+    image: mariadb:11.4
+    container_name: nc_db
+    # Nextcloud yêu cầu READ-COMMITTED và binlog dạng ROW
+    command: >-
+      --transaction-isolation=READ-COMMITTED
+      --log-bin=binlog
+      --binlog-format=ROW
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Chưa có .env - hãy chạy ./scripts/init-env.sh}
+      MARIADB_DATABASE: ${MYSQL_DATABASE:-nextcloud}
+      MARIADB_USER: ${MYSQL_USER:-nextcloud}
+      MARIADB_PASSWORD: ${MYSQL_PASSWORD:?Chưa có .env - hãy chạy ./scripts/init-env.sh}
+      MARIADB_AUTO_UPGRADE: "1"
+    volumes:
+      - nc_db:/var/lib/mysql         # NAMED VOLUME: dữ liệu CSDL bền vững
+    networks:
+      - backend                      # chỉ nằm trong mạng nội bộ, KHÔNG publish port ra host
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ------------------------------------------------------------------- Redis
+  redis:
+    <<: *common
+    image: redis:7-alpine
+    container_name: nc_redis
+    # Redis chỉ làm cache + file locking nên tắt persistence (--save "" / appendonly no)
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?Chưa có .env - hãy chạy ./scripts/init-env.sh}
+      - --maxmemory
+      - 128mb
+      - --maxmemory-policy
+      - volatile-lru
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}   # chỉ dùng cho healthcheck bên dưới
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # --------------------------------------------------------------- Nextcloud
+  app:
+    <<: *common
+    image: ${NEXTCLOUD_IMAGE:-nextcloud:apache}
+    container_name: nc_app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      # Mặc định mở http://localhost:8080. Khi bật HTTPS, đặt NC_BIND_IP=127.0.0.1
+      - "${NC_BIND_IP:-0.0.0.0}:${NC_HTTP_PORT:-8080}:80"
+    environment:
+      MYSQL_HOST: db
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-nextcloud}
+      MYSQL_USER: ${MYSQL_USER:-nextcloud}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Chưa có .env - hãy chạy ./scripts/init-env.sh}
+      REDIS_HOST: redis
+      REDIS_HOST_PASSWORD: ${REDIS_PASSWORD}
+      NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER:-admin}
+      NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD:?Chưa có .env - hãy chạy ./scripts/init-env.sh}
+      NEXTCLOUD_TRUSTED_DOMAINS: ${NEXTCLOUD_TRUSTED_DOMAINS:-localhost}
+      TRUSTED_PROXIES: ${FRONTEND_SUBNET:-172.28.77.0/24}
+    volumes:
+      # --- NAMED VOLUME: mã nguồn Nextcloud + dữ liệu người dùng (do Docker quản lý)
+      - nc_html:/var/www/html
+      - nc_data:/var/www/html/data
+      # --- BIND MOUNT: file cấu hình PHP trên host, gắn chỉ-đọc vào container
+      - ./config/php-custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
+      # --- BIND MOUNT: thư mục trên host, chia sẻ hai chiều với container
+      - ./shared:/mnt/shared
+    networks:
+      - frontend
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost/status.php | grep -q '\"installed\":true'"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 120s             # lần chạy đầu Nextcloud cần 1-2 phút để tự cài đặt
+
+  # -------------------------------------------------- Cron (tác vụ nền của NC)
+  cron:
+    <<: *common
+    image: ${NEXTCLOUD_IMAGE:-nextcloud:apache}
+    container_name: nc_cron
+    entrypoint: /cron.sh
+    depends_on:
+      app:
+        condition: service_healthy
+    volumes:
+      - nc_html:/var/www/html
+      - nc_data:/var/www/html/data
+      - ./config/php-custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
+    networks:
+      - frontend
+      - backend
+
+# ------------------------------------------------------------------- Networks
+networks:
+  frontend:                          # mạng có ra Internet (app, reverse proxy)
+    name: nc_frontend
+    ipam:
+      config:
+        - subnet: ${FRONTEND_SUBNET:-172.28.77.0/24}
+  backend:                           # mạng nội bộ: db/redis KHÔNG ra được Internet
+    name: nc_backend
+    internal: true
+
+# -------------------------------------------------------------------- Volumes
+# Đặt tên cố định để script backup/restore không phụ thuộc tên project
+volumes:
+  nc_db:
+    name: nc_db
+  nc_html:
+    name: nc_html
+  nc_data:
+    name: nc_data

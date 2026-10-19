@@ -1,0 +1,17 @@
+# Caddyfile – reverse proxy HTTPS cho Nextcloud (bind mount chỉ-đọc vào container nc_caddy)
+# NC_DOMAIN lấy từ .env (mặc định localhost). "tls internal" = Caddy tự tạo CA nội bộ,
+# phù hợp lab/demo. Môi trường thật có tên miền công khai: bỏ dòng "tls internal" để
+# Caddy tự xin chứng chỉ Let's Encrypt.
+{$NC_DOMAIN:localhost} {
+	tls internal
+	encode zstd gzip
+
+	# Bản thật nên bật HSTS (bỏ comment). Không bật khi demo trên localhost để khỏi bị trình duyệt nhớ.
+	# header Strict-Transport-Security "max-age=15552000; includeSubDomains"
+
+	# Theo khuyến nghị của Nextcloud cho CalDAV/CardDAV
+	redir /.well-known/carddav /remote.php/dav 301
+	redir /.well-known/caldav  /remote.php/dav 301
+
+	reverse_proxy app:80
+}

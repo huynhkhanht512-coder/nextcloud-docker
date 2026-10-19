@@ -1,0 +1,11 @@
+# Tự động tạo Pull Request khi có phiên bản mới của image (compose) và của GitHub Actions
+version: 2
+updates:
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

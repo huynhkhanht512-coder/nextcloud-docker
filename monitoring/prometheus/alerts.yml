@@ -1,0 +1,47 @@
+# Luật cảnh báo – xem tại Prometheus > Alerts (http://localhost:9090/alerts)
+# Muốn gửi thông báo (Email/Slack/Telegram) thì thêm Alertmanager; ở mức đồ án chỉ cần hiển thị cảnh báo.
+groups:
+  - name: nextcloud-containers
+    rules:
+      # Container biến mất khỏi cAdvisor (bị stop/crash và chưa tự khởi động lại) quá 1 phút
+      - alert: NextcloudAppDown
+        expr: absent(container_last_seen{name="nc_app"})
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Container nc_app không chạy"
+
+      - alert: NextcloudDbDown
+        expr: absent(container_last_seen{name="nc_db"})
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Container nc_db (MariaDB) không chạy"
+
+      - alert: NextcloudRedisDown
+        expr: absent(container_last_seen{name="nc_redis"})
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Container nc_redis không chạy"
+
+      # CPU > 80% của 1 core trong 5 phút liên tục
+      - alert: ContainerHighCpu
+        expr: sum by (name) (rate(container_cpu_usage_seconds_total{name=~"nc_.+"}[2m])) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container {{ $labels.name }} dùng CPU cao"
+
+      # RAM > 90% mức giới hạn (chỉ áp dụng khi container có mem_limit – xem docker-compose.security.yml)
+      - alert: ContainerHighMemory
+        expr: (container_memory_working_set_bytes{name=~"nc_.+"} / on(name) (container_spec_memory_limit_bytes{name=~"nc_.+"} > 0)) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container {{ $labels.name }} sắp hết RAM (>90% giới hạn)"
