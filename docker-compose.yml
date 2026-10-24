@@ -21,7 +21,7 @@ services:
   # ---------------------------------------------------------------- Database
   db:
     <<: *common
-    image: mariadb:11.4
+    image: mariadb:13.0
     container_name: nc_db
     # Nextcloud yêu cầu READ-COMMITTED và binlog dạng ROW
     command: >-
